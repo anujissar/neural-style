@@ -4,6 +4,7 @@ import vgg
 
 import tensorflow as tf
 import numpy as np
+import scipy.misc
 
 from sys import stderr
 
@@ -20,7 +21,7 @@ except NameError:
 
 def stylize(network, initial, initial_noiseblend, content, styles, preserve_colors, iterations,
         content_weight, content_weight_blend, style_weight, style_layer_weight_exp, style_blend_weights, tv_weight,
-        learning_rate, beta1, beta2, epsilon, pooling,
+        learning_rate, beta1, beta2, epsilon, pooling, style_segment,content_segment,
         print_iterations=None, checkpoint_iterations=None):
     """
     Stylize images.
@@ -31,10 +32,13 @@ def stylize(network, initial, initial_noiseblend, content, styles, preserve_colo
 
     :rtype: iterator[tuple[int|None,image]]
     """
+    #print "shape", content_segment.shape, content_segment.dtype
     shape = (1,) + content.shape
     style_shapes = [(1,) + style.shape for style in styles]
+
     content_features = {}
     style_features = [{} for _ in styles]
+    style_features_size = [{} for _ in styles]
 
     vgg_weights, vgg_mean_pixel = vgg.load_net(network)
 
@@ -65,14 +69,22 @@ def stylize(network, initial, initial_noiseblend, content, styles, preserve_colo
         g = tf.Graph()
         with g.as_default(), g.device('/cpu:0'), tf.Session() as sess:
             image = tf.placeholder('float', shape=style_shapes[i])
-            net = vgg.net_preloaded(vgg_weights, image, pooling)
+            style_bitMap = tf.placeholder('float', shape=style_shapes[i])
+            net = vgg.net_preloaded(vgg_weights, image, pooling, style_bitMap)
             style_pre = np.array([vgg.preprocess(styles[i], vgg_mean_pixel)])
             for layer in STYLE_LAYERS:
-                features = net[layer].eval(feed_dict={image: style_pre})
+                features = net[layer].eval(feed_dict={image: style_pre, style_bitMap: np.array([style_segment])})
                 features = np.reshape(features, (-1, features.shape[3]))
-                gram = np.matmul(features.T, features) / features.size
+                unique, counts =  np.unique(features,return_counts=True)
+                dict_unique = dict(zip(unique, counts))
+                size = features.size - dict_unique[0]
+                print size
+                gram = np.matmul(features.T, features) / size
+                #gram = np.matmul(features.T, features) / features.size
                 style_features[i][layer] = gram
-
+                style_features_size[i][layer] = size
+                #print style_features_size[i][layer]
+                # imsave(layer+".jpg", gram)
     initial_content_noise_coeff = 1.0 - initial_noiseblend
 
     # make stylized image using backpropogation
@@ -86,7 +98,9 @@ def stylize(network, initial, initial_noiseblend, content, styles, preserve_colo
             noise = np.random.normal(size=shape, scale=np.std(content) * 0.1)
             initial = (initial) * initial_content_noise_coeff + (tf.random_normal(shape) * 0.256) * (1.0 - initial_content_noise_coeff)
         image = tf.Variable(initial)
-        net = vgg.net_preloaded(vgg_weights, image, pooling)
+        content_bitMap = tf.placeholder(tf.float64, shape=shape)
+        content_bitMap = tf.cast(content_bitMap, tf.float32)
+        net = vgg.net_preloaded(vgg_weights, image, pooling, content_bitMap)
 
         # content loss
         content_layers_weights = {}
@@ -110,9 +124,11 @@ def stylize(network, initial, initial_noiseblend, content, styles, preserve_colo
                 _, height, width, number = map(lambda i: i.value, layer.get_shape())
                 size = height * width * number
                 feats = tf.reshape(layer, (-1, number))
-                gram = tf.matmul(tf.transpose(feats), feats) / size
+                gram = tf.matmul(tf.transpose(feats), feats)/size#/tf.cast((tf.count_nonzero(feats, dtype=tf.float32)/size), tf.float32)
+                #gram = tf.matmul(tf.transpose(feats), feats)/size
                 style_gram = style_features[i][style_layer]
-                style_losses.append(style_layers_weights[style_layer] * 2 * tf.nn.l2_loss(gram - style_gram) / style_gram.size)
+                style_losses.append(style_layers_weights[style_layer] * 2 * tf.nn.l2_loss(gram - style_gram) / style_gram.size)#style_features_size[i][style_layer])
+
             style_loss += style_weight * style_blend_weights[i] * reduce(tf.add, style_losses)
 
         # total variation denoising
@@ -130,29 +146,31 @@ def stylize(network, initial, initial_noiseblend, content, styles, preserve_colo
         train_step = tf.train.AdamOptimizer(learning_rate, beta1, beta2, epsilon).minimize(loss)
 
         def print_progress():
-            stderr.write('  content loss: %g\n' % content_loss.eval())
-            stderr.write('    style loss: %g\n' % style_loss.eval())
-            stderr.write('       tv loss: %g\n' % tv_loss.eval())
-            stderr.write('    total loss: %g\n' % loss.eval())
+            stderr.write('  content loss: %g\n' % content_loss.eval(feed_dict={content_bitMap : np.array([content_segment])}))
+            stderr.write('    style loss: %g\n' % style_loss.eval(feed_dict={content_bitMap : np.array([content_segment])}))
+            stderr.write('       tv loss: %g\n' % tv_loss.eval(feed_dict={content_bitMap : np.array([content_segment])}))
+            stderr.write('    total loss: %g\n' % loss.eval(feed_dict={content_bitMap : np.array([content_segment])}))
 
         # optimization
         best_loss = float('inf')
         best = None
         with tf.Session() as sess:
-            sess.run(tf.global_variables_initializer())
+            sess.run(tf.global_variables_initializer(), feed_dict={content_bitMap : np.array([content_segment])})
             stderr.write('Optimization started...\n')
             if (print_iterations and print_iterations != 0):
+                stderr.write('Iteration %4d/%4d\n' % (i + 1, iterations))
                 print_progress()
             for i in range(iterations):
                 stderr.write('Iteration %4d/%4d\n' % (i + 1, iterations))
-                train_step.run()
+                train_step.run(feed_dict={content_bitMap : np.array([content_segment])})
+                #train_step.run()
 
                 last_step = (i == iterations - 1)
                 if last_step or (print_iterations and i % print_iterations == 0):
                     print_progress()
 
                 if (checkpoint_iterations and i % checkpoint_iterations == 0) or last_step:
-                    this_loss = loss.eval()
+                    this_loss = loss.eval(feed_dict={content_bitMap : np.array([content_segment])})
                     if this_loss < best_loss:
                         best_loss = this_loss
                         best = image.eval()
@@ -209,3 +227,6 @@ def gray2rgb(gray):
     rgb = np.empty((w, h, 3), dtype=np.float32)
     rgb[:, :, 2] = rgb[:, :, 1] = rgb[:, :, 0] = gray
     return rgb
+def imsave(path, img):
+    img = np.clip(img, 0, 255).astype(np.uint8)
+    Image.fromarray(img).save(path, quality=95)

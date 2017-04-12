@@ -26,9 +26,22 @@ def load_net(data_path):
     weights = data['layers'][0]
     return weights, mean_pixel
 
-def net_preloaded(weights, input_image, pooling):
+def net_preloaded_style_segment(weights, input_image, pooling, bitMap):
+    full_style = net_preloaded(weights, input_image, pooling)
+    bitMap_style = net_preloaded(weights_bitMap, bitMap, pooling)
+
+def rectifyEdges(current,bit_map):
+    tf_sum = tf.reduce_sum(current,[0,1,2])
+    tf_count = tf.count_nonzero(bit_map, dtype=tf.float32)
+    tf_avg = tf.divide(tf_sum,tf_count)
+    avg_bit_map = tf.multiply(tf.cast(tf.equal(bit_map,0),tf.float32),tf_avg)
+    return tf.add(current,avg_bit_map)
+
+
+def net_preloaded(weights, input_image, pooling, bitMap= None):
     net = {}
     current = input_image
+    current_bit = bitMap
     for i, name in enumerate(VGG19_LAYERS):
         kind = name[:4]
         if kind == 'conv':
@@ -37,11 +50,22 @@ def net_preloaded(weights, input_image, pooling):
             # tensorflow: weights are [height, width, in_channels, out_channels]
             kernels = np.transpose(kernels, (1, 0, 2, 3))
             bias = bias.reshape(-1)
-            current = _conv_layer(current, kernels, bias)
+            if bitMap is not None :
+                current = _conv_layer(rectifyEdges(current, current_bit), kernels, bias)
+                weights_bitMap = np.full(kernels.shape, 1,dtype=kernels.dtype)
+                bias_bitMap = np.full(bias.shape, 0,dtype=bias.dtype)
+                current_bit= _conv_layer(current_bit, weights_bitMap, bias_bitMap)
+                current = tf.select(tf.equal(current_bit,0), current_bit, current)
+            else :
+                current = _conv_layer(current, kernels, bias)
+
         elif kind == 'relu':
             current = tf.nn.relu(current)
         elif kind == 'pool':
             current = _pool_layer(current, pooling)
+            if bitMap is not None :
+                current_bit = _pool_layer(current_bit, pooling)
+                current = tf.select(tf.equal(current_bit,0), current_bit, current)
         net[name] = current
 
     assert len(net) == len(VGG19_LAYERS)

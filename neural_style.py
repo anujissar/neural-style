@@ -23,9 +23,10 @@ BETA1 = 0.9
 BETA2 = 0.999
 EPSILON = 1e-08
 STYLE_SCALE = 1.0
-ITERATIONS = 1000
+ITERATIONS = 10000
 VGG_PATH = 'imagenet-vgg-verydeep-19.mat'
 POOLING = 'max'
+#python neural_style.py --content contentImage.jpg --styles styleImage.jpg  --style-seg styleImageSegmentation.jpg --output o.jpg --checkpoint-iterations 100 --checkpoint-output  "output%s.jpg" --content-seg contentImageSegmentation.jpg --content-weight 0 --print-iterations 100 --tv-weight 0
 
 def build_parser():
     parser = ArgumentParser()
@@ -102,6 +103,12 @@ def build_parser():
     parser.add_argument('--pooling',
             dest='pooling', help='pooling layer configuration: max or avg (default %(default)s)',
             metavar='POOLING', default=POOLING)
+    parser.add_argument('--style-seg',
+            dest='style_segment', help='style image segmentation image with foreground as white',
+            metavar='STYLESEG', required=True)
+    parser.add_argument('--content-seg',
+            dest='content_segment', help='content image segmentation image with foreground as white',
+            metavar='CONTENTSEG', required=True)
     return parser
 
 
@@ -114,7 +121,14 @@ def main():
 
     content_image = imread(options.content)
     style_images = [imread(style) for style in options.styles]
-
+    style_seg = imread(options.style_segment)
+    content_seg = imread(options.content_segment)
+    print np.unique(content_seg,return_counts=True)
+    temp = np.full(content_seg.shape, 225,dtype=content_seg.dtype)
+    content_seg = np.select([content_seg == 0, content_seg>0] , [temp, temp])
+    #style_1 = np.select([style_seg == 0, style_seg>0] , [temp, style_images[0]])
+    print style_seg.shape
+    print np.unique(content_seg,return_counts=True)
     width = options.width
     if width is not None:
         new_shape = (int(math.floor(float(content_image.shape[0]) /
@@ -174,7 +188,9 @@ def main():
         epsilon=options.epsilon,
         pooling=options.pooling,
         print_iterations=options.print_iterations,
-        checkpoint_iterations=options.checkpoint_iterations
+        checkpoint_iterations=options.checkpoint_iterations,
+        style_segment=style_seg,
+        content_segment=content_seg
     ):
         output_file = None
         combined_rgb = image
